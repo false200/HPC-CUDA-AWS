@@ -1,4 +1,4 @@
-# HPC CUDA AWS
+# GPU Monte Carlo Risk Engine
 
 GPU Monte Carlo risk engine. Custom CUDA kernels price a book of equities and European options, then revalue that book under correlated geometric Brownian motion to produce Value-at-Risk and expected shortfall. The same engine binary runs on a workstation and inside an AWS Batch GPU container.
 
