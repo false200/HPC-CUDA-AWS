@@ -1,37 +1,40 @@
 # Architecture
 
-This repository is a Monte Carlo risk engine. A user submits a small portfolio. Custom CUDA kernels price the options, then revalue the whole book on tens or hundreds of millions of correlated market scenarios, and return Value-at-Risk, expected shortfall, and a speed comparison against a multi-threaded CPU. The same engine binary serves a local dashboard and an AWS Batch GPU job.
+This repository is a local Monte Carlo risk engine. A user submits a small portfolio. Custom CUDA kernels price the options, then revalue the whole book on tens or hundreds of millions of correlated scenarios, and return Value-at-Risk, expected shortfall, and a speed comparison against a multi-threaded CPU. The run that exists is the dashboard on `127.0.0.1:8765` calling `mc_engine` on the workstation GPU. No model is trained.
 
 ## What problem it solves
 
 A risk number for a mixed book is not a single formula. Equities move together, option values change with the new spot and the time left to expiry, and the loss that matters is in the tail, not the average. Closed-form Black-Scholes prices each European option once. It does not price a path-dependent Asian, and it does not give the distribution of a portfolio whose names are correlated.
 
-Monte Carlo does both, if you can run enough paths. One hundred million scenarios is enough to make the 99% tail stable, and it is too much work for a straightforward CPU loop if the desk wants an answer in seconds. The engine puts that loop in CUDA kernels written for this book, measures the speedup against its own CPU implementation, and can hand the same job to a spot GPU in AWS when the local card is busy or absent.
+Monte Carlo does both, if you can run enough paths. One hundred million scenarios is enough to make the 99% tail stable, and it is too much work for a straightforward CPU loop if the answer is wanted in seconds. The engine puts that loop in CUDA kernels written for this book and measures the speedup against its own CPU implementation. That measurement was done on the local GPU.
 
-The sample spots are illustrative. They are not live market data, and the AWS prices in the dashboard are list-rate estimates, not a bill from a deployed account.
+## Synthetic dataset
+
+The sample book is synthetic. Every spot, volatility, dividend, rate, drift, correlation entry, and position is a constant in `sample_portfolio()` in `common/jobtext.py`. No price file was downloaded. No exchange or vendor feed is called. No parameter was fitted or trained. SPX, AAPL, XOM, and GLD are labels. The numbers are not live quotes.
+
+| Name | Spot | Vol | Rate | Dividend | Drift |
+| --- | --- | --- | --- | --- | --- |
+| SPX | 5200 | 0.16 | 0.045 | 0.013 | 0.032 |
+| AAPL | 190 | 0.28 | 0.045 | 0.005 | 0.040 |
+| XOM | 110 | 0.22 | 0.045 | 0.032 | 0.013 |
+| GLD | 180 | 0.14 | 0.045 | 0 | 0.045 |
+
+Positions: long 8 SPX, short 4 SPX puts struck at 5000 expiring in 0.25y, long 30 AAPL 200 calls and 20 AAPL 170 puts expiring in 0.50y, long 40 XOM and 25 GLD. Correlation is moderate between SPX and AAPL (0.55), weaker between the others, and near zero between SPX and GLD. Seed 42. The Asian is a 1-year AAPL 190 call averaged over 32 steps, quantity 1. The dashboard loads this book. Numbers typed over it are still hand inputs, not a market feed.
 
 ## What the system is
 
-Two runtimes share one job format and one result JSON.
+One runtime was built and run. The browser talks to the local server, and the server talks to the engine.
 
 ```mermaid
 flowchart LR
-  user[Risk user]
+  user[User]
   desk[Local dashboard]
-  api[API Gateway]
-  lambda[Lambda]
-  s3[S3 jobs bucket]
-  batch[AWS Batch spot GPU]
   engine[mc_engine]
+  gpu[Workstation GPU]
 
   user --> desk
   desk --> engine
-  user --> api
-  api --> lambda
-  lambda --> s3
-  lambda --> batch
-  batch --> s3
-  batch --> engine
+  engine --> gpu
 ```
 
 | Piece | Role |
@@ -41,11 +44,11 @@ flowchart LR
 | `common/jobtext.py` | Checks limits and writes the `MCJOB 1` text the engine reads |
 | `src/engine.c` | Loads the GPU driver, compiles the kernels, runs the CPU baseline, writes JSON |
 | `kernels/mc_risk.cu` | Philox RNG, European pricing, scenario revaluation, VaR histogram, Asian control variate |
-| `aws/handler.py` | Lambda: validate, store the job, submit Batch, report status |
-| `aws/template.yaml` | HTTP API, Lambda, private S3 bucket, spot Batch for `g4dn.xlarge` and `g5.xlarge` |
-| `docker/` | Ubuntu CUDA image that compiles the same host and runs the S3 entrypoint |
+| `aws/handler.py` | Lambda source. Not deployed |
+| `aws/template.yaml` | SAM template for an HTTP API, a bucket, and spot Batch. Not deployed |
+| `docker/` | Dockerfile and entrypoint. The image was not built |
 
-The local server never leaves the machine. The cloud path is defined in the template and has not been deployed from this workstation. The container image is specified; it was not built here.
+The local server binds to `127.0.0.1` only. The AWS and Docker files are in the repository and were not executed.
 
 ## How a job runs locally
 
@@ -75,39 +78,6 @@ sequenceDiagram
 ```
 
 Paths are resolved from the process, not from a fixed drive. `build.ps1` uses its own directory as the repository root, searches for a 64-bit `gcc` (`CC`, then `PATH`, then a toolchain directory on a local drive), and installs the NVRTC wheel into `.cuda_pkgs` only when no `nvrtc64_*.dll` is already there. The engine then searches that tree, `NVRTC_PATH`, and `CUDA_PATH\bin`.
-
-## How a job runs on AWS
-
-The template is the scale-out path for the same engine.
-
-```mermaid
-sequenceDiagram
-  participant Client
-  participant Api as API Gateway
-  participant Fn as Lambda
-  participant Bucket as S3
-  participant Batch as AWS Batch
-  participant Gpu as g4dn or g5
-
-  Client->>Api: POST /jobs
-  Api->>Fn: validate book
-  Fn->>Bucket: jobs/id/job.txt and meta.json
-  Fn->>Batch: submit_job
-  Fn-->>Client: 202 job_id
-  Batch->>Gpu: start spot container
-  Gpu->>Bucket: download job.txt
-  Gpu->>Gpu: mc_engine run
-  Gpu->>Bucket: upload result.json
-  Client->>Api: GET /jobs/id
-  Api->>Fn: read result or Batch status
-  Fn-->>Client: SUCCEEDED plus JSON, or the Batch state
-```
-
-Lambda accepts only a validated book. It writes `jobs/<uuid>/job.txt`, submits one Batch job, and stores the Batch id in `meta.json`. `GET /jobs/{job_id}` returns `result.json` when the container has uploaded it. Until then it returns the Batch state (`SUBMITTED`, `RUNNABLE`, `RUNNING`, and so on).
-
-The compute environment is managed spot, `SPOT_CAPACITY_OPTIMIZED`, bid 100% of on-demand, minimum and desired vCPUs at 0, maximum 16. Instance types are `g4dn.xlarge` (NVIDIA T4) and `g5.xlarge` (NVIDIA A10G). Each job asks for 4 vCPUs, 12288 MB, and 1 GPU. The job role can `GetObject` and `PutObject` only under `jobs/`. The bucket blocks public access, uses AES-256, and expires `jobs/` after 14 days. Idle capacity scales back to zero.
-
-Inside the image, `docker/entrypoint.sh` copies `JOB_S3` to a local file, runs `/opt/mc_engine`, and copies the JSON to `OUT_S3`. The container sets `MC_KERNEL=/opt/kernels/mc_risk.cu` and `NVRTC_PATH` to the image's `libnvrtc.so.12`. The host is still plain C. The CUDA toolkit in the image is the compiler runtime, not a pricing library.
 
 ## The numerical method
 
@@ -143,7 +113,7 @@ The host talks to the driver through `nvcuda` (`cuCtxCreate`, memory copies, mod
 
 ## What a book may contain
 
-`common/jobtext.py` is the gate for both the dashboard and Lambda.
+`common/jobtext.py` is the gate for the dashboard. The same function is imported by the Lambda file, which was not deployed.
 
 | Limit | Value |
 | --- | --- |
@@ -156,24 +126,13 @@ The host talks to the driver through `nvcuda` (`cuCtxCreate`, memory copies, mod
 | Option maturity | longer than the VaR horizon, positive strike |
 | Vol, rate, dividend, drift | inside the demo ranges enforced by `validate` |
 
-An equity-only book skips the CPU pricing benchmark, so the reported speedup is 0. A book with options benchmarks the matched European pricer. The Asian, if present, is one additional contract on a named underlying.
-
-The sample book is four names and six positions, plus one AAPL Asian:
-
-| Name | Spot | Vol | Rate | Dividend | Drift |
-| --- | --- | --- | --- | --- | --- |
-| SPX | 5200 | 0.16 | 0.045 | 0.013 | 0.032 |
-| AAPL | 190 | 0.28 | 0.045 | 0.005 | 0.040 |
-| XOM | 110 | 0.22 | 0.045 | 0.032 | 0.013 |
-| GLD | 180 | 0.14 | 0.045 | 0 | 0.045 |
-
-Positions: long 8 SPX, short 4 SPX puts struck at 5000 expiring in 0.25y, long 30 AAPL 200 calls and 20 AAPL 170 puts expiring in 0.50y, long 40 XOM and 25 GLD. Correlation is moderate between SPX and AAPL (0.55), weaker between the others, and near zero between SPX and GLD. Seed 42. The Asian is a 1-year AAPL 190 call averaged over 32 steps, quantity 1.
+An equity-only book skips the CPU pricing benchmark, so the reported speedup is 0. A book with options benchmarks the matched European pricer. The Asian, if present, is one additional contract on a named underlying. The synthetic book above is four names, six positions, and one Asian.
 
 ## Results
 
-Two different checks are recorded below. The self-test answers "is the math right, and is the GPU faster than this CPU?" The 100-million-path run answers "what does the sample book look like at the size the demo is built for?"
+Two checks were run locally. The self-test checks the formulas. The 100-million-path run is the synthetic book at the size the demo is built for.
 
-Hardware for both: NVIDIA GeForce RTX 3050 Laptop, compute capability 8.6, 16 SMs, 4 GB, driver CUDA 13.1. The host compiler is 64-bit MinGW-w64. There is no `nvcc` on that machine, so NVRTC from the CUDA 12.9 redistributable compiled the kernels. These figures are one workstation. They are not a guarantee, and they were not measured on AWS.
+Hardware for both: NVIDIA GeForce RTX 3050 Laptop, compute capability 8.6, 16 SMs, 4 GB, driver CUDA 13.1. The host compiler is 64-bit MinGW-w64. There is no `nvcc` on that machine, so NVRTC from the CUDA 12.9 redistributable compiled the kernels. These figures are that one workstation.
 
 ### Self-test
 
@@ -193,7 +152,7 @@ Hardware for both: NVIDIA GeForce RTX 3050 Laptop, compute capability 8.6, 16 SM
 
 The option self-test job finished in 0.095 seconds on the GPU.
 
-### Sample book, 100 million scenarios
+### Synthetic book, 100 million scenarios
 
 One-day horizon. Device portfolio value matched the host value to the printed digits.
 
@@ -212,10 +171,10 @@ Every option Monte Carlo price in that run sat inside the Black-Scholes 95% conf
 
 A 10 million path run of the same book from the dashboard finished in about 0.83 seconds, with a speedup around 7× to 8× and VaR within a dollar of the 100 million path figures (95% about 852.84, 99% about 1,211.73, 99% expected shortfall about 1,389.92). The tail estimates are already stable at 10 million paths on this book. The larger run is the capacity demonstration.
 
-### What the cloud table means
+### Dashboard cost column
 
-The dashboard multiplies the measured GPU seconds by us-east-1 Linux on-demand list rates from October 2026: `g4dn.xlarge` at $0.526 per hour (T4, 8.1 FP32 TFLOPS) and `g5.xlarge` at $1.006 per hour (A10G, 31.2 FP32 TFLOPS). A second column scales those seconds by the ratio of published peaks to this GPU's reported peak, about 6.14 TFLOPS, and only when that peak is between 1 and 40 TFLOPS. Spot is often cheaper than the list rate, and a real Batch job also waits for a capacity grant. Treat the column as a cost sketch.
+The page multiplies the measured local GPU seconds by published us-east-1 Linux on-demand list rates: `g4dn.xlarge` at $0.526 per hour and `g5.xlarge` at $1.006 per hour. A second column scales those seconds by published FP32 peaks (8.1 and 31.2 TFLOPS) against this GPU's reported peak, about 6.14 TFLOPS, when that peak is between 1 and 40. No AWS account was used. The column is not a bill.
 
-## What is intentionally out of scope
+## What this repository does not do
 
-The engine prices Europeans in the book with Black-Scholes on each scenario. It does not calibrate a volatility surface, does not bump greeks across the book, and does not simulate rates or discrete dividends. The Asian is one extra contract, not part of the VaR histogram. Names, position count, and path count stop at the limits above so the demo kernels stay on a fixed launch shape. AWS resources exist as a SAM template. Deploying them needs an account, a VPC subnet, a security group, and an image in ECR.
+No market dataset is loaded. No model is trained. Europeans in the book are Black-Scholes on each scenario. There is no volatility surface, no book-wide greek bumps, and no rate or discrete-dividend simulation. The Asian is one extra contract, not part of the VaR histogram. `aws/` and `docker/` are source files only: the stack was not deployed and the image was not built.
