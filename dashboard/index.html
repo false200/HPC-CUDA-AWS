@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monte Carlo Risk Engine</title>
+<style>
+  :root {
+    --bg: #14140f;
+    --panel: #1e1e16;
+    --panel-2: #26261c;
+    --line: #3a382c;
+    --text: #f0ead8;
+    --muted: #a39b84;
+    --copper: #e0a15a;
+    --copper-2: #f2c48a;
+    --green: #9cbe7a;
+    --red: #d47862;
+    --blue: #8eb8c4;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 500px at 10% -10%, rgba(224,161,90,0.08), transparent 50%),
+      var(--bg);
+    color: var(--text);
+    font: 15px/1.45 "Segoe UI", "Helvetica Neue", sans-serif;
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    gap: 24px;
+    align-items: flex-end;
+    padding: 28px 32px 18px;
+    border-bottom: 1px solid var(--line);
+  }
+  h1 { font-size: 28px; font-weight: 600; margin: 0; letter-spacing: -0.03em; }
+  h1 span { color: var(--copper-2); }
+  .sub { color: var(--muted); margin-top: 6px; max-width: 640px; }
+  .badge {
+    border: 1px solid var(--line);
+    background: var(--panel);
+    padding: 8px 12px;
+    border-radius: 999px;
+    color: var(--blue);
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  main {
+    display: grid;
+    grid-template-columns: 420px 1fr;
+    gap: 22px;
+    padding: 22px 32px 40px;
+  }
+  section {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 16px 16px 18px;
+  }
+  h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+  label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  input, select, button { font: inherit; color: var(--text); }
+  input, select {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 7px 8px;
+  }
+  .grid-3, .grid-6 { display: grid; gap: 8px; margin-bottom: 12px; }
+  .grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .presets { display: flex; gap: 8px; margin: 8px 0 14px; }
+  .presets button, .ghost {
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 6px 10px;
+    cursor: pointer;
+    color: var(--text);
+  }
+  .presets button.active, .presets button:hover { border-color: var(--copper); color: var(--copper-2); }
+  .block { margin: 14px 0; padding-top: 8px; border-top: 1px solid var(--line); }
+  .und, .pos {
+    display: grid;
+    gap: 6px;
+    margin-bottom: 8px;
+    padding: 8px;
+    background: rgba(0,0,0,0.15);
+    border-radius: 10px;
+  }
+  .und { grid-template-columns: 1.1fr 0.8fr 0.7fr 0.7fr 0.7fr 0.8fr auto; }
+  .pos { grid-template-columns: 1fr 0.8fr 0.8fr 0.8fr 0.8fr auto; }
+  .mini { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  button.link {
+    background: transparent;
+    border: 0;
+    color: var(--red);
+    cursor: pointer;
+    padding: 0 4px;
+  }
+  .corr { display: grid; gap: 4px; }
+  .corr input { padding: 4px; text-align: center; }
+  .run {
+    width: 100%;
+    margin-top: 8px;
+    background: var(--copper);
+    color: #2a1c0c;
+    border: 0;
+    border-radius: 12px;
+    padding: 12px 14px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .run:disabled { opacity: 0.55; cursor: wait; }
+  .status { min-height: 1.3em; color: var(--muted); margin-top: 8px; }
+  .status.err { color: var(--red); }
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+  .card { background: var(--panel-2); border-radius: 12px; padding: 12px; }
+  .card .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .card .v { font: 600 26px/1.2 "Cascadia Mono", Consolas, monospace; margin-top: 4px; }
+  .card .v.loss { color: var(--red); }
+  .card .v.gain { color: var(--green); }
+  .card .v.gpu { color: var(--blue); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: right; padding: 7px 6px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+  th { color: var(--muted); font-weight: 600; }
+  .ok { color: var(--green); }
+  .bad { color: var(--red); }
+  .charts { display: grid; grid-template-columns: 1.4fr 0.8fr; gap: 12px; margin-top: 14px; }
+  canvas { width: 100%; background: #17170f; border-radius: 12px; display: block; }
+  .note { color: var(--muted); font-size: 13px; margin-top: 8px; }
+  .arch { margin-top: 16px; color: var(--muted); font-size: 13px; }
+  .arch b { color: var(--text); font-weight: 600; }
+  #empty { color: var(--muted); padding: 28px 8px; }
+  @media (max-width: 1100px) {
+    main { grid-template-columns: 1fr; }
+    .cards, .charts { grid-template-columns: 1fr 1fr; }
+    header { flex-direction: column; align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Monte Carlo <span>risk engine</span></h1>
+    <div class="sub">CUDA kernels price options and revalue a correlated book. The same engine binary is what an AWS Batch GPU container runs.</div>
+  </div>
+  <div class="badge" id="gpu-badge">GPU idle</div>
+</header>
+<main>
+  <section>
+    <h2>Portfolio</h2>
+    <div class="grid-3">
+      <div><label>Scenarios</label><input id="paths" type="number" min="10000" step="1000000"></div>
+      <div><label>Horizon (trading days)</label><input id="horizon" type="number" min="1" max="252" step="1"></div>
+      <div><label>Seed</label><input id="seed" type="number" min="0" step="1"></div>
+    </div>
+    <div class="presets">
+      <button type="button" data-paths="1000000">1 million</button>
+      <button type="button" data-paths="10000000">10 million</button>
+      <button type="button" data-paths="100000000">100 million</button>
+    </div>
+    <div class="block">
+      <h2>Underlyings</h2>
+      <div id="unds"></div>
+      <button class="ghost" id="add-und" type="button">Add underlying</button>
+    </div>
+    <div class="block">
+      <h2>Correlation</h2>
+      <div id="corr" class="corr"></div>
+    </div>
+    <div class="block">
+      <h2>Positions</h2>
+      <div id="pos"></div>
+      <button class="ghost" id="add-pos" type="button">Add position</button>
+    </div>
+    <div class="block">
+      <h2>Asian option</h2>
+      <label><input id="asian-on" type="checkbox" style="width:auto"> Price an arithmetic Asian call with a geometric control variate</label>
+      <div class="grid-3" id="asian-fields" style="margin-top:8px">
+        <div><label>Underlying</label><select id="asian-und"></select></div>
+        <div><label>Strike</label><input id="asian-k" type="number" step="any"></div>
+        <div><label>Maturity (years)</label><input id="asian-t" type="number" step="any"></div>
+        <div><label>Steps</label><input id="asian-steps" type="number" min="2" max="256" step="1"></div>
+        <div><label>Quantity</label><input id="asian-qty" type="number" step="any"></div>
+      </div>
+    </div>
+    <button class="run" id="run" type="button">Run on GPU</button>
+    <div class="status" id="status"></div>
+  </section>
+  <section>
+    <h2>Results</h2>
+    <div id="empty">Submit the book. A 10 million path run is usually about a second on this GPU. 100 million is the full demo.</div>
+    <div id="results" hidden>
+      <div class="cards" id="cards"></div>
+      <div class="charts">
+        <div>
+          <canvas id="hist" width="720" height="280"></canvas>
+          <div class="note" id="hist-note"></div>
+        </div>
+        <div>
+          <canvas id="speed" width="420" height="280"></canvas>
+          <div class="note" id="speed-note"></div>
+        </div>
+      </div>
+      <div class="block">
+        <h2>Book</h2>
+        <div style="overflow-x:auto"><table id="book"></table></div>
+      </div>
+      <div class="block">
+        <h2>Risk factors</h2>
+        <table id="factors"></table>
+      </div>
+      <div class="block" id="asian-out"></div>
+      <div class="block">
+        <h2>Cost versus performance</h2>
+        <table id="cost"></table>
+        <div class="note" id="cost-note"></div>
+      </div>
+      <div class="arch" id="model"></div>
+    </div>
+  </section>
+</main>
+<script>
+let state = null;
+
+const money = (n) => {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  const v = Number(n);
+  return (v < 0 ? "−" : "") + "$" + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+const num = (n, d = 4) => Number(n).toLocaleString(undefined, { maximumFractionDigits: d });
+
+function field(label, html) {
+  return `<div><div class="mini">${label}</div>${html}</div>`;
+}
+
+function render() {
+  const unds = document.getElementById("unds");
+  unds.innerHTML = state.underlyings.map((u, i) => `
+    <div class="und" data-i="${i}">
+      ${field("Name", `<input data-u="name" value="${u.name}">`)}
+      ${field("Spot", `<input data-u="spot" type="number" step="any" value="${u.spot}">`)}
+      ${field("Vol", `<input data-u="vol" type="number" step="any" value="${u.vol}">`)}
+      ${field("Rate", `<input data-u="rate" type="number" step="any" value="${u.rate}">`)}
+      ${field("Div", `<input data-u="dividend" type="number" step="any" value="${u.dividend}">`)}
+      ${field("Drift", `<input data-u="drift" type="number" step="any" value="${u.drift}">`)}
+      <button class="link" data-remove-und="${i}" type="button">✕</button>
+    </div>`).join("");
+
+  const n = state.underlyings.length;
+  const corr = document.getElementById("corr");
+  corr.style.gridTemplateColumns = `repeat(${n}, 1fr)`;
+  corr.innerHTML = state.correlation.map((row, r) => row.map((v, c) =>
+    `<input data-r="${r}" data-c="${c}" type="number" step="0.01" min="-1" max="1" value="${v}" ${r === c ? "readonly" : ""}>`
+  ).join("")).join("");
+
+  const names = state.underlyings.map(u => u.name);
+  document.getElementById("pos").innerHTML = state.positions.map((p, i) => `
+    <div class="pos">
+      ${field("Underlying", `<select data-p="underlying">${names.map(nm => `<option ${nm === p.underlying ? "selected" : ""}>${nm}</option>`).join("")}</select>`)}
+      ${field("Kind", `<select data-p="kind">${["equity","call","put"].map(k => `<option ${k === p.kind ? "selected" : ""}>${k}</option>`).join("")}</select>`)}
+      ${field("Strike", `<input data-p="strike" type="number" step="any" value="${p.strike || ""}" ${p.kind === "equity" ? "disabled" : ""}>`)}
+      ${field("Maturity", `<input data-p="maturity_years" type="number" step="any" value="${p.maturity_years || ""}" ${p.kind === "equity" ? "disabled" : ""}>`)}
+      ${field("Qty", `<input data-p="quantity" type="number" step="any" value="${p.quantity}">`)}
+      <button class="link" data-remove-pos="${i}" type="button">✕</button>
+    </div>`).join("");
+
+  const asianSel = document.getElementById("asian-und");
+  const current = state.asian ? state.asian.underlying : names[0];
+  asianSel.innerHTML = names.map(nm => `<option ${nm === current ? "selected" : ""}>${nm}</option>`).join("");
+  document.getElementById("paths").value = state.paths;
+  document.getElementById("horizon").value = state.horizon_days;
+  document.getElementById("seed").value = state.seed;
+  document.getElementById("asian-on").checked = !!state.asian;
+  document.getElementById("asian-k").value = state.asian ? state.asian.strike : 100;
+  document.getElementById("asian-t").value = state.asian ? state.asian.maturity_years : 1;
+  document.getElementById("asian-steps").value = state.asian ? state.asian.steps : 32;
+  document.getElementById("asian-qty").value = state.asian ? state.asian.quantity : 1;
+  document.querySelectorAll(".presets button").forEach(b => {
+    b.classList.toggle("active", Number(b.dataset.paths) === Number(state.paths));
+  });
+}
+
+function scrape() {
+  state.paths = Number(document.getElementById("paths").value);
+  state.horizon_days = Number(document.getElementById("horizon").value);
+  state.seed = Number(document.getElementById("seed").value);
+  state.bench_paths = Math.min(state.paths, 2000000);
+  document.querySelectorAll(".und").forEach(row => {
+    const i = Number(row.dataset.i);
+    row.querySelectorAll("[data-u]").forEach(el => {
+      const key = el.dataset.u;
+      state.underlyings[i][key] = key === "name" ? el.value.trim() : Number(el.value);
+    });
+  });
+  document.querySelectorAll("#corr input").forEach(el => {
+    state.correlation[el.dataset.r][el.dataset.c] = Number(el.value);
+  });
+  document.querySelectorAll(".pos").forEach((row, i) => {
+    row.querySelectorAll("[data-p]").forEach(el => {
+      const key = el.dataset.p;
+      state.positions[i][key] = (key === "underlying" || key === "kind") ? el.value : Number(el.value);
+    });
+    if (state.positions[i].kind === "equity") {
+      state.positions[i].strike = 0;
+      state.positions[i].maturity_years = 0;
+    }
+  });
+  if (document.getElementById("asian-on").checked) {
+    state.asian = {
+      underlying: document.getElementById("asian-und").value,
+      strike: Number(document.getElementById("asian-k").value),
+      maturity_years: Number(document.getElementById("asian-t").value),
+      steps: Number(document.getElementById("asian-steps").value),
+      quantity: Number(document.getElementById("asian-qty").value)
+    };
+  } else {
+    state.asian = null;
+  }
+}
+
+document.getElementById("add-und").onclick = () => {
+  scrape();
+  if (state.underlyings.length >= 8) return;
+  const name = "U" + (state.underlyings.length + 1);
+  state.underlyings.push({ name, spot: 100, vol: 0.2, rate: 0.045, dividend: 0, drift: 0.045 });
+  state.correlation.forEach(row => row.push(0));
+  state.correlation.push(state.underlyings.map((_, i) => i === state.underlyings.length - 1 ? 1 : 0));
+  render();
+};
+document.getElementById("add-pos").onclick = () => {
+  scrape();
+  state.positions.push({ underlying: state.underlyings[0].name, kind: "equity", quantity: 1, strike: 0, maturity_years: 0 });
+  render();
+};
+document.body.addEventListener("click", (e) => {
+  const und = e.target.dataset.removeUnd;
+  const pos = e.target.dataset.removePos;
+  const preset = e.target.dataset.paths;
+  if (und != null) {
+    scrape();
+    const i = Number(und);
+    if (state.underlyings.length <= 1) return;
+    const name = state.underlyings[i].name;
+    state.underlyings.splice(i, 1);
+    state.correlation.splice(i, 1);
+    state.correlation.forEach(row => row.splice(i, 1));
+    state.positions = state.positions.filter(p => p.underlying !== name);
+    if (!state.positions.length) state.positions.push({ underlying: state.underlyings[0].name, kind: "equity", quantity: 1 });
+    if (state.asian && state.asian.underlying === name) state.asian.underlying = state.underlyings[0].name;
+    render();
+  }
+  if (pos != null) {
+    scrape();
+    if (state.positions.length <= 1) return;
+    state.positions.splice(Number(pos), 1);
+    render();
+  }
+  if (preset) {
+    document.getElementById("paths").value = preset;
+    state.paths = Number(preset);
+    document.querySelectorAll(".presets button").forEach(b => b.classList.toggle("active", b === e.target));
+  }
+});
+document.body.addEventListener("input", (e) => {
+  if (e.target.dataset.r != null && e.target.dataset.c != null) {
+    const r = e.target.dataset.r, c = e.target.dataset.c;
+    if (r !== c) {
+      const mirror = document.querySelector(`#corr input[data-r="${c}"][data-c="${r}"]`);
+      if (mirror) mirror.value = e.target.value;
+    }
+  }
+});
+
+function drawHist(varBlock) {
+  const canvas = document.getElementById("hist");
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  const bins = varBlock.hist_bins;
+  const lo = varBlock.hist_lo, hi = varBlock.hist_hi;
+  const max = Math.max(...bins, 1);
+  const padL = 46, padR = 12, padT = 16, padB = 32;
+  ctx.strokeStyle = "#3a382c";
+  ctx.fillStyle = "#a39b84";
+  ctx.font = "12px Segoe UI";
+  ctx.beginPath();
+  ctx.moveTo(padL, padT);
+  ctx.lineTo(padL, h - padB);
+  ctx.lineTo(w - padR, h - padB);
+  ctx.stroke();
+  const bw = (w - padL - padR) / bins.length;
+  bins.forEach((c, i) => {
+    const bh = (c / max) * (h - padT - padB);
+    const x = padL + i * bw;
+    const mid = lo + (i + 0.5) * (hi - lo) / bins.length;
+    ctx.fillStyle = mid < 0 ? "#d47862" : "#9cbe7a";
+    ctx.globalAlpha = 0.85;
+    ctx.fillRect(x + 0.5, h - padB - bh, Math.max(bw - 1, 1), bh);
+  });
+  ctx.globalAlpha = 1;
+  const xOf = (v) => padL + (v - lo) / (hi - lo) * (w - padL - padR);
+  function mark(v, color, label, y) {
+    const x = xOf(v);
+    if (x < padL || x > w - padR) return;
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(x, padT);
+    ctx.lineTo(x, h - padB);
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.fillText(label, Math.min(x + 4, w - padR - 36), y);
+  }
+  mark(varBlock.pnl_quantile_05, "#e0a15a", "95%", padT + 14);
+  mark(varBlock.pnl_quantile_01, "#f2c48a", "99%", padT + 30);
+  ctx.fillStyle = "#a39b84";
+  ctx.fillText(num(lo, 0), padL, h - 10);
+  ctx.fillText(num(hi, 0), w - 70, h - 10);
+  ctx.fillText("P&L", w / 2 - 10, h - 8);
+}
+
+function drawSpeed(timing) {
+  const canvas = document.getElementById("speed");
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  const rows = [
+    ["CPU", timing.cpu_price_paths_per_sec || 0, "#a39b84"],
+    ["GPU", timing.gpu_price_paths_per_sec || 0, "#e0a15a"]
+  ];
+  const max = Math.max(rows[0][1], rows[1][1], 1);
+  ctx.font = "14px Segoe UI";
+  rows.forEach((row, i) => {
+    const y = 70 + i * 80;
+    const bw = (row[1] / max) * (w - 130);
+    ctx.fillStyle = "#a39b84";
+    ctx.fillText(row[0], 16, y + 18);
+    ctx.fillStyle = row[2];
+    ctx.fillRect(70, y, Math.max(bw, 2), 28);
+    ctx.fillStyle = "#f0ead8";
+    ctx.fillText((row[1] / 1e6).toFixed(1) + " M/s", 78, y + 19);
+  });
+  ctx.fillStyle = "#a39b84";
+  ctx.fillText("European pricing, matched path count", 16, 36);
+}
+
+function show(result) {
+  document.getElementById("empty").hidden = true;
+  document.getElementById("results").hidden = false;
+  const t = result.timing;
+  const v = result.var;
+  document.getElementById("gpu-badge").textContent = result.gpu.name + "  ·  sm " + result.gpu.compute_capability;
+  const cards = [
+    ["Portfolio value", money(result.portfolio_value), ""],
+    ["95% VaR", money(v.var_95), "loss"],
+    ["99% VaR", money(v.var_99), "loss"],
+    ["99% ES", money(v.es_99), "loss"],
+    ["GPU / CPU", (t.speedup || 0).toFixed(1) + "×", "gpu"],
+    ["Job time", (t.gpu_job_seconds || 0).toFixed(2) + " s", "gpu"],
+    ["Price throughput", ((t.gpu_price_paths_per_sec || 0) / 1e6).toFixed(0) + " M/s", "gpu"],
+    ["VaR throughput", ((t.var_paths_per_sec || 0) / 1e6).toFixed(1) + " M/s", ""]
+  ];
+  document.getElementById("cards").innerHTML = cards.map(([k, val, cls]) =>
+    `<div class="card"><div class="k">${k}</div><div class="v ${cls}">${val}</div></div>`).join("");
+  document.getElementById("hist-note").textContent =
+    `One-day P&L across ${Number(v.scenarios).toLocaleString()} scenarios. ` +
+    `The 99% loss is ${money(v.var_99)}; the average loss inside that tail is ${money(v.es_99)}.`;
+  drawHist(v);
+  drawSpeed(t);
+  document.getElementById("speed-note").textContent =
+    `${t.cpu_threads} CPU threads versus the GPU on ${Number(result.bench_paths).toLocaleString()} matched pricing paths. ` +
+    `Full valuation used ${Number(result.paths).toLocaleString()} paths.`;
+
+  const book = result.book.map(row => {
+    const mc = row.monte_carlo == null ? "spot" : num(row.monte_carlo, 4);
+    const bs = row.kind === "equity" ? "—" : num(row.unit_value, 4);
+    const flag = row.kind === "equity" ? "" : (row.black_scholes_inside_ci ? `<span class="ok">inside CI</span>` : `<span class="bad">outside CI</span>`);
+    return `<tr><td>${row.name}</td><td>${row.kind}</td><td>${num(row.quantity, 2)}</td><td>${money(row.line_value)}</td><td>${bs}</td><td>${mc}</td><td>${row.std_error == null ? "—" : num(row.std_error, 4)}</td><td>${flag}</td></tr>`;
+  }).join("");
+  document.getElementById("book").innerHTML =
+    `<tr><th>Name</th><th>Kind</th><th>Qty</th><th>Line</th><th>Black-Scholes</th><th>Monte Carlo</th><th>Std err</th><th></th></tr>` + book;
+
+  document.getElementById("factors").innerHTML =
+    `<tr><th>Underlying</th><th>Delta dV/dS</th><th>Vega per vol point</th></tr>` +
+    result.underlyings.map(u => `<tr><td>${u.name}</td><td>${num(u.delta, 3)}</td><td>${money(u.vega * 0.01)}</td></tr>`).join("");
+
+  const asian = document.getElementById("asian-out");
+  if (result.asian) {
+    const a = result.asian;
+    asian.innerHTML = `<h2>Asian call</h2><p>${a.name} arithmetic control-variate price ${num(a.control_variate_price, 4)} ` +
+      `(stderr ${num(a.control_variate_std_error, 5)}). Geometric Monte Carlo ${num(a.geometric_monte_carlo, 4)} versus closed form ${num(a.geometric_closed_form, 4)}.</p>`;
+  } else asian.innerHTML = "";
+
+  const cloud = result.cloud;
+  document.getElementById("cost").innerHTML =
+    `<tr><th>Instance</th><th>GPU</th><th>On-demand</th><th>Seconds at this speed</th><th>USD at this speed</th><th>Seconds if peak scales</th><th>USD if peak scales</th></tr>` +
+    cloud.instances.map(row => `<tr>
+      <td>${row.instance}</td><td>${row.gpu}</td><td>$${row.usd_per_hour.toFixed(3)}/h</td>
+      <td>${row.seconds_at_this_gpu_speed.toFixed(2)}</td>
+      <td>$${row.usd_at_this_gpu_speed.toFixed(5)}</td>
+      <td>${row.seconds_if_peak_scales != null ? row.seconds_if_peak_scales.toFixed(2) : "—"}</td>
+      <td>${row.usd_if_peak_scales != null ? "$" + row.usd_if_peak_scales.toFixed(5) : "—"}</td>
+    </tr>`).join("");
+  document.getElementById("cost-note").textContent = cloud.note + " Local reported peak is " +
+    Number(cloud.local_fp32_tflops).toFixed(2) + " FP32 TFLOPS.";
+  document.getElementById("model").innerHTML = "<b>Model.</b> " + result.model +
+    "<br><b>AWS path.</b> Dashboard → API Gateway → Lambda validates and writes S3 → Batch spot queue → g4dn or g5 runs this same engine in Docker.";
+}
+
+document.getElementById("run").onclick = async () => {
+  scrape();
+  const btn = document.getElementById("run");
+  const status = document.getElementById("status");
+  btn.disabled = true;
+  status.className = "status";
+  status.textContent = `Running ${Number(state.paths).toLocaleString()} scenarios on the GPU…`;
+  try {
+    const res = await fetch("/api/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "run failed");
+    show(data);
+    status.textContent = `Finished in ${Number(data.timing.gpu_job_seconds).toFixed(2)} seconds on ${data.gpu.name}.`;
+  } catch (err) {
+    status.className = "status err";
+    status.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+fetch("/api/sample").then(r => r.json()).then(data => { state = data; render(); });
+</script>
+</body>
+</html>

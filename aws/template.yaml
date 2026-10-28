@@ -1,0 +1,199 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: GPU Monte Carlo risk engine. API Gateway to Lambda to S3 to Batch on spot g4dn or g5.
+
+Parameters:
+  ImageUri:
+    Type: String
+    Description: ECR URI of the image built from docker/Dockerfile
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets for the Batch GPU instances. Need a route to S3 or an S3 endpoint.
+  SecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    Architectures: [x86_64]
+
+Resources:
+  JobsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-jobs
+            Status: Enabled
+            ExpirationInDays: 14
+            Prefix: jobs/
+
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowMethods: [GET, POST]
+        AllowHeaders: [content-type]
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambda_pkg
+      Handler: handler.lambda_handler
+      Environment:
+        Variables:
+          BUCKET: !Ref JobsBucket
+          JOB_QUEUE: !Ref JobQueue
+          JOB_DEFINITION: !Ref JobDefinition
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref JobsBucket
+        - Statement:
+            Effect: Allow
+            Action:
+              - batch:SubmitJob
+              - batch:DescribeJobs
+            Resource: "*"
+      Events:
+        PostJob:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Method: POST
+            Path: /jobs
+        GetJob:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Method: GET
+            Path: /jobs/{job_id}
+
+  BatchServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: batch.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole
+
+  SpotFleetRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: spotfleet.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetTaggingRole
+
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+      Policies:
+        - PolicyName: read-jobs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:ListBucket]
+                Resource:
+                  - !GetAtt JobsBucket.Arn
+                  - !Sub "${JobsBucket.Arn}/*"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref EcsInstanceRole]
+
+  JobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ecs-tasks.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: job-s3
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject]
+                Resource: !Sub "${JobsBucket.Arn}/jobs/*"
+
+  GpuEnvironment:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      Type: MANAGED
+      State: ENABLED
+      ServiceRole: !GetAtt BatchServiceRole.Arn
+      ComputeResources:
+        Type: SPOT
+        AllocationStrategy: SPOT_CAPACITY_OPTIMIZED
+        MinvCpus: 0
+        DesiredvCpus: 0
+        MaxvCpus: 16
+        InstanceTypes: [g4dn.xlarge, g5.xlarge]
+        Subnets: !Ref SubnetIds
+        SecurityGroupIds: !Ref SecurityGroupIds
+        InstanceRole: !Ref InstanceProfile
+        SpotIamFleetRole: !GetAtt SpotFleetRole.Arn
+        BidPercentage: 100
+
+  JobQueue:
+    Type: AWS::Batch::JobQueue
+    Properties:
+      State: ENABLED
+      Priority: 1
+      ComputeEnvironmentOrder:
+        - Order: 1
+          ComputeEnvironment: !Ref GpuEnvironment
+
+  JobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      Type: container
+      ContainerProperties:
+        Image: !Ref ImageUri
+        JobRoleArn: !GetAtt JobRole.Arn
+        Vcpus: 4
+        Memory: 12288
+        ResourceRequirements:
+          - Type: GPU
+            Value: "1"
+        Command: ["/opt/entrypoint.sh"]
+
+Outputs:
+  ApiUrl:
+    Description: POST /jobs and GET /jobs/{job_id}
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com"
+  Bucket:
+    Value: !Ref JobsBucket
