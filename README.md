@@ -108,7 +108,3 @@ Option Monte Carlo prices fell inside the Black-Scholes 95% confidence interval.
 | `aws/` | Lambda handler and SAM template. Present, not deployed |
 | `docker/` | Dockerfile and entrypoint. Present, image not built |
 | `build.ps1` | Locate a 64-bit compiler, fetch NVRTC if needed, build, self-test |
-
-## License
-
-No license is granted by this repository. Add one before distributing the code.
