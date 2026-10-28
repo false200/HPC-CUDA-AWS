@@ -1,94 +1,137 @@
-# GPU Monte Carlo risk engine
+# HPC CUDA AWS
 
-A book of equities and European options is priced with hand-written CUDA kernels and revalued under correlated geometric Brownian motion. Value-at-Risk and expected shortfall come from a GPU histogram of the P&L. The same `mc_engine` binary runs on this PC and inside the AWS Batch image.
+GPU Monte Carlo risk engine. Custom CUDA kernels price a book of equities and European options, then revalue that book under correlated geometric Brownian motion to produce Value-at-Risk and expected shortfall. The same engine binary runs on a workstation and inside an AWS Batch GPU container.
 
-## What ran on this machine
+## Features
 
-NVIDIA GeForce RTX 3050 Laptop GPU, compute capability 8.6, 16 SMs. The driver is CUDA 13.1. There is no `nvcc` on the machine, so the engine compiles `kernels/mc_risk.cu` with NVRTC (the CUDA 12.9 runtime compiler, installed under `D:\HPC_L2\.cuda_pkgs`).
+- Hand-written CUDA kernels. Pricing does not call cuRAND or a vendor pricing library.
+- Philox4x32-10 counter-based RNG, checked against the published test vectors.
+- European prices use antithetic variates and are checked against Black-Scholes.
+- Portfolio scenarios use a Cholesky factor, then a full revaluation. VaR and expected shortfall come from a GPU histogram.
+- Arithmetic Asian calls use a geometric Asian control variate.
+- Multi-threaded CPU baseline and a measured GPU speedup.
+- Local dashboard, plus an API Gateway, Lambda, S3, and spot Batch deployment for `g4dn` and `g5`.
 
-Self-test (`build\mc_engine.exe selftest`):
+## Architecture
 
-- Philox4x32-10 matches the published test vectors on the CPU and on the GPU.
-- Black-Scholes ATM call (S=K=100, r=5%, vol=20%, T=1) is 10.450584, and the device formula matches the host.
-- One-day 99% VaR and expected shortfall of a unit equity match the lognormal formula.
-- A 2 million path call lands inside sampling error of Black-Scholes.
-- A geometric Asian matches its closed form. The arithmetic price uses that geometric average as a control variate.
-- European pricing is about 9.7× faster than 12 CPU threads at 1 million paths.
+```text
+Browser
+  -> local dashboard (dashboard/server.py)     -> mc_engine
+  -> API Gateway -> Lambda -> S3 -> AWS Batch  -> mc_engine on a GPU instance
+```
 
-Sample four-name book, 100 million scenarios, 1-day horizon:
+Workstation jobs and Batch jobs read the same job text and write the same JSON. The host locates `kernels/mc_risk.cu` and NVRTC from the executable directory, `NVRTC_PATH`, or `CUDA_PATH`. Nothing in the source is tied to a drive letter.
 
-| | |
+## Requirements
+
+| Tool | Used for |
 | --- | --- |
-| Portfolio value | 50,699.92 |
-| 95% VaR | 853.34 |
-| 99% VaR | 1,211.44 |
-| 99% expected shortfall | 1,390.12 |
-| GPU job time | 8.39 s |
-| Pricing throughput | 278 million paths/s (8.5× vs 12 CPU threads) |
-| Scenario throughput | 25.6 million paths/s |
-| Device value vs analytic value | same to the printed digits |
+| 64-bit MinGW-w64 `gcc` | Windows host build. Set `CC` if it is not on `PATH`. |
+| Python 3.9 or newer | Dashboard, job validation, and the NVRTC wheel install. |
+| NVIDIA driver and GPU | Local runs. The build downloads the NVRTC redistributable into `.cuda_pkgs` when `nvcc` is not installed. |
+| Docker with the NVIDIA runtime | Batch image. |
+| AWS SAM CLI | Stack deploy. |
 
-Option Monte Carlo prices sit inside the 95% confidence interval of the Black-Scholes marks. The AAPL geometric Asian at 100 million paths is 13.39356 against a closed form of 13.39300.
+On Linux the container image supplies `gcc` and `libnvrtc`.
 
-Spots in the sample book are illustrative, not live prices.
+## Quick start
 
-## Run locally
+From the repository root:
 
 ```powershell
-powershell -File D:\HPC_L2\build.ps1
-powershell -File D:\HPC_L2\run_dashboard.ps1
+powershell -File .\build.ps1
+powershell -File .\run_dashboard.ps1
 ```
 
-Open http://127.0.0.1:8765 . Presets are 1 million, 10 million, and 100 million scenarios.
+Open http://127.0.0.1:8765. The sample book can be run at 1 million, 10 million, or 100 million scenarios.
 
-`build.ps1` sets `TEMP`, `TMP`, and the pip cache to `D:\HPC_L2` before it downloads NVRTC or compiles. The engine only links `KERNEL32.dll` and `msvcrt.dll`.
+`build.ps1` resolves the repository from its own path. Compiler output, pip cache, and temporary files stay in `build\`, `.cache\`, and `tmp\` inside that repository. Those directories are gitignored.
 
-Direct engine call:
+Run the engine directly:
 
 ```powershell
-D:\HPC_L2\build\mc_engine.exe run D:\HPC_L2\tmp\bench100.txt D:\HPC_L2\build\bench100.json
+.\build\mc_engine.exe selftest
+.\build\mc_engine.exe run .\path\to\job.txt .\path\to\result.json
 ```
+
+On Linux, after `gcc -O3 -std=c11 -o build/mc_engine src/engine.c -pthread -ldl -lm`:
+
+```bash
+./build/mc_engine selftest
+./build/mc_engine run job.txt result.json
+```
+
+## Configuration
+
+| Variable | Meaning |
+| --- | --- |
+| `CC` | 64-bit `gcc` used by `build.ps1`. |
+| `MC_KERNEL` | Path to `mc_risk.cu`. Default: next to the repo, or beside the binary. |
+| `NVRTC_PATH` | `nvrtc64_*.dll` or `libnvrtc.so.12`. Default: `.cuda_pkgs`, then `CUDA_PATH`. |
+| `CUDA_PATH` | CUDA toolkit root. Its `bin` directory is searched for NVRTC. |
+| `JOB_S3`, `OUT_S3` | S3 URIs used by the Batch entrypoint. |
 
 ## Model
 
-- Price paths are geometric Brownian motion. European prices use antithetic normals. The discount is the continuous risk-free rate.
-- Portfolio scenarios apply a Cholesky factor of the correlation matrix, step every underlying to the horizon, and revalue. Equities are marked at the simulated spot. Options are Black-Scholes with the remaining maturity.
-- Drift is the price drift. The sample uses rate minus dividend (risk-neutral). One day is `1/252` of a year.
-- VaR is the loss at the 95% and 99% P&L quantiles. Expected shortfall is the average P&L inside that tail, read back from the histogram. A negative VaR would mean that tail is still a gain.
-- The random number generator is Philox4x32-10. Nothing is drawn from cuRAND.
+Prices follow geometric Brownian motion. European payoffs use antithetic normals and continuous discounting at the risk-free rate.
 
-## AWS
+Each portfolio scenario applies the Cholesky factor of the correlation matrix, steps every underlying to the horizon, and revalues the book. Equities are marked at the simulated spot. Options are Black-Scholes with the remaining maturity. The sample book sets price drift to rate minus dividend. One trading day is `1/252` of a year.
 
-The container image is `docker/Dockerfile` (`nvidia/cuda:12.4.1-devel`). It compiles this same `src/engine.c` and runs `kernels/mc_risk.cu` through the image's libnvrtc. `docker/entrypoint.sh` copies the job from S3, runs the engine, and writes the JSON back.
+VaR is the loss at the 95% and 99% P&L quantiles. Expected shortfall is the average P&L inside that tail. A negative VaR means that tail is still a gain.
 
-`aws/template.yaml` is a SAM stack:
+Sample spots are illustrative. They are not live market data.
 
-1. HTTP API `POST /jobs` and `GET /jobs/{job_id}`
-2. Lambda validates the book, writes `job.txt` to S3, and submits Batch
-3. Spot compute environment on `g4dn.xlarge` (T4) and `g5.xlarge` (A10G), scaled to zero when idle
-4. The container role can read and write only the `jobs/` prefix
+## AWS deployment
 
-Packaging the Lambda zip:
+`docker/Dockerfile` starts from `nvidia/cuda:12.4.1-devel-ubuntu22.04`, compiles `src/engine.c`, and runs `docker/entrypoint.sh`. The entrypoint downloads the job from S3, runs the engine, and uploads the JSON.
 
-```powershell
-powershell -File D:\HPC_L2\build.ps1
-```
+`aws/template.yaml` creates:
 
-That refreshes `lambda_pkg\handler.py` and `lambda_pkg\jobtext.py`. Deploy with your subnet and security group:
+1. An HTTP API with `POST /jobs` and `GET /jobs/{job_id}`.
+2. A Lambda that validates the book, writes the job to S3, and submits Batch.
+3. A spot compute environment for `g4dn.xlarge` (T4) and `g5.xlarge` (A10G), scaled to zero when idle.
+4. A job role that can read and write only the `jobs/` prefix.
+
+`build.ps1` copies `aws/handler.py` and `common/jobtext.py` into `lambda_pkg\`, which is the SAM code location.
 
 ```powershell
-sam deploy --template-file D:\HPC_L2\aws\template.yaml --guided --parameter-overrides ImageUri=ACCOUNT.dkr.ecr.REGION.amazonaws.com/mc-risk:latest SubnetIds=subnet-xxx SecurityGroupIds=sg-xxx
+sam deploy --template-file .\aws\template.yaml --guided `
+  --parameter-overrides ImageUri=<account>.dkr.ecr.<region>.amazonaws.com/mc-risk:latest `
+  SubnetIds=<subnet-id> SecurityGroupIds=<sg-id>
 ```
 
-Build and push the image from a host whose Docker data root is not the C: drive, or from CI. On-demand list prices used by the dashboard are us-east-1 Linux: g4dn.xlarge `$0.526/h`, g5.xlarge `$1.006/h` (October 2026). The page also scales the measured time by published FP32 peaks (T4 8.1 TFLOPS, A10G 31.2 TFLOPS, this GPU reported 6.14 TFLOPS at 1500 MHz). That scale is an estimate. Spot prices move and are usually lower than those list rates.
+Build and push the image from a machine with the NVIDIA container toolkit, or from CI.
+
+The dashboard prices us-east-1 Linux on-demand list rates, checked in October 2026: `g4dn.xlarge` at `$0.526/hour` and `g5.xlarge` at `$1.006/hour`. A second column scales the measured runtime by published FP32 peaks (T4 8.1 TFLOPS, A10G 31.2 TFLOPS). That column is an estimate, not a run on AWS. Spot prices change through the day and are usually lower than those list rates.
+
+## Example results
+
+These figures are from one workstation run of the sample book. They are a reference, not a performance guarantee.
+
+| Check | Result |
+| --- | --- |
+| Black-Scholes ATM call, S = K = 100, r = 5%, vol = 20%, T = 1 | 10.450584, host and device agree |
+| 100 million scenarios, 1-day horizon | portfolio value 50,699.92 |
+| 95% / 99% VaR | 853.34 / 1,211.44 |
+| 99% expected shortfall | 1,390.12 |
+| GPU job time | 8.39 s |
+| European pricing | 278 million paths/s, about 8.5× a 12-thread CPU |
+| Scenario revaluation | 25.6 million paths/s |
+
+Option Monte Carlo prices fell inside the Black-Scholes 95% confidence interval. The geometric Asian matched its closed form.
 
 ## Layout
 
 | Path | Role |
 | --- | --- |
-| `kernels/mc_risk.cu` | Philox, European pricing, scenario VaR, Asian control variate |
-| `src/engine.c` | Driver API host, CPU baseline, JSON result |
+| `kernels/mc_risk.cu` | RNG, European pricing, scenario VaR, Asian control variate |
+| `src/engine.c` | Driver API host, CPU baseline, JSON writer |
 | `dashboard/` | Browser and local API |
 | `common/jobtext.py` | Validation and the job text format |
-| `aws/` | Lambda and SAM |
-| `docker/` | Batch image |
+| `aws/` | Lambda handler and SAM template |
+| `docker/` | Batch image and entrypoint |
+| `build.ps1` | Locate a 64-bit compiler, fetch NVRTC if needed, build, self-test |
+
+## License
+
+No license is granted by this repository. Add one before distributing the code.

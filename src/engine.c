@@ -659,20 +659,36 @@ static int file_exists(const char* path) {
     return 1;
 }
 
+static void path_join(char* out, size_t n, const char* a, const char* b) {
+#ifdef _WIN32
+    snprintf(out, n, "%s\\%s", a, b);
+#else
+    snprintf(out, n, "%s/%s", a, b);
+#endif
+}
+
 static void find_kernel(char* out, size_t n) {
     const char* env = getenv("MC_KERNEL");
     if (env && env[0] && file_exists(env)) {
         snprintf(out, n, "%s", env);
         return;
     }
-    char dir[1024], parent[1024];
+    char dir[1024], parent[1024], cand[1200];
     exe_dir(dir, sizeof dir);
     parent_of(dir, parent, sizeof parent);
+    path_join(cand, sizeof cand, parent, "kernels");
+    path_join(out, n, cand, "mc_risk.cu");
+    if (file_exists(out)) return;
+    path_join(cand, sizeof cand, dir, "kernels");
+    path_join(out, n, cand, "mc_risk.cu");
+    if (file_exists(out)) return;
+    snprintf(out, n, "kernels%cmc_risk.cu",
 #ifdef _WIN32
-    snprintf(out, n, "%s\\kernels\\mc_risk.cu", parent);
+             '\\'
 #else
-    snprintf(out, n, "%s/kernels/mc_risk.cu", parent);
+             '/'
 #endif
+    );
 }
 
 static int load_module_bytes(const void* image, CUmodule* mod) {
@@ -700,36 +716,111 @@ static int save_cache(const char* path, const void* bytes, size_t n) {
     return w == n;
 }
 
-static int compile_with_nvrtc(const char* source, int want_cubin, char** image, size_t* image_n) {
-    const char* env = getenv("NVRTC_PATH");
-    char path[1200];
-    path[0] = 0;
-    if (env && env[0]) snprintf(path, sizeof path, "%s", env);
 #ifdef _WIN32
-    if (!path[0]) {
-        char dir[1024], parent[1024];
-        exe_dir(dir, sizeof dir);
-        parent_of(dir, parent, sizeof parent);
-        snprintf(path, sizeof path,
-                 "%s\\.cuda_pkgs\\nvidia\\cuda_nvrtc\\bin\\nvrtc64_120_0.dll", parent);
+static int find_in_dir(const char* dir, const char* pattern, char* out, size_t n) {
+    char spec[1100];
+    WIN32_FIND_DATAA fd;
+    HANDLE handle;
+    snprintf(spec, sizeof spec, "%s\\%s", dir, pattern);
+    handle = FindFirstFileA(spec, &fd);
+    if (handle == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        snprintf(out, n, "%s\\%s", dir, fd.cFileName);
+        FindClose(handle);
+        return 1;
+    } while (FindNextFileA(handle, &fd));
+    FindClose(handle);
+    return 0;
+}
+
+static int locate_nvrtc(char* out, size_t n) {
+    const char* env = getenv("NVRTC_PATH");
+    char exe[1024], parent[1024], dir[1100];
+    const char* cuda;
+    const char* rels[] = {".cuda_pkgs\\nvidia\\cuda_nvrtc\\bin", ".cuda_pkgs\\nvidia\\cu12\\bin\\x86_64", "bin"};
+    char roots[2][1024];
+    int r, i;
+    if (env && env[0] && file_exists(env)) {
+        snprintf(out, n, "%s", env);
+        return 1;
     }
+    exe_dir(exe, sizeof exe);
+    parent_of(exe, parent, sizeof parent);
+    snprintf(roots[0], sizeof roots[0], "%s", parent);
+    snprintf(roots[1], sizeof roots[1], "%s", exe);
+    for (r = 0; r < 2; ++r) {
+        for (i = 0; i < 3; ++i) {
+            snprintf(dir, sizeof dir, "%s\\%s", roots[r], rels[i]);
+            if (find_in_dir(dir, "nvrtc64_*.dll", out, n)) return 1;
+        }
+    }
+    cuda = getenv("CUDA_PATH");
+    if (cuda && cuda[0]) {
+        snprintf(dir, sizeof dir, "%s\\bin", cuda);
+        if (find_in_dir(dir, "nvrtc64_*.dll", out, n)) return 1;
+    }
+    set_err("NVRTC was not found. Set NVRTC_PATH or run the project build script.");
+    return 0;
+}
+#else
+static int locate_nvrtc(char* out, size_t n) {
+    const char* env = getenv("NVRTC_PATH");
+    char exe[1024], parent[1024], cand[1200];
+    const char* fixed[] = {"/usr/local/cuda/lib64/libnvrtc.so.12", "/usr/local/cuda/lib64/libnvrtc.so",
+                           "libnvrtc.so.12", "libnvrtc.so"};
+    size_t i;
+    if (env && env[0] && (file_exists(env) || strchr(env, '/') == NULL)) {
+        snprintf(out, n, "%s", env);
+        return 1;
+    }
+    exe_dir(exe, sizeof exe);
+    parent_of(exe, parent, sizeof parent);
+    snprintf(cand, sizeof cand, "%s/.cuda_pkgs/nvidia/cuda_nvrtc/lib/libnvrtc.so.12", parent);
+    if (file_exists(cand)) {
+        snprintf(out, n, "%s", cand);
+        return 1;
+    }
+    snprintf(cand, sizeof cand, "%s/libnvrtc.so.12", exe);
+    if (file_exists(cand)) {
+        snprintf(out, n, "%s", cand);
+        return 1;
+    }
+    for (i = 0; i < sizeof fixed / sizeof fixed[0]; ++i) {
+        if (fixed[i][0] != '/' || file_exists(fixed[i])) {
+            snprintf(out, n, "%s", fixed[i]);
+            return 1;
+        }
+    }
+    set_err("NVRTC was not found. Set NVRTC_PATH.");
+    return 0;
+}
+#endif
+
+static int compile_with_nvrtc(const char* source, int want_cubin, char** image, size_t* image_n) {
+    char path[1200];
+    if (!locate_nvrtc(path, sizeof path)) return 0;
+#ifdef _WIN32
     char dirbuf[1200];
-    snprintf(dirbuf, sizeof dirbuf, "%s", path);
-    char* slash = strrchr(dirbuf, '\\');
-    if (!slash) slash = strrchr(dirbuf, '/');
-    if (slash) *slash = 0;
     char builtins[1400];
-    snprintf(builtins, sizeof builtins, "%s\\nvrtc-builtins64_129.dll", dirbuf);
-    LoadLibraryExA(builtins, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-    HMODULE lib = LoadLibraryExA(path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    DWORD load_flags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
+    HMODULE lib;
+    snprintf(dirbuf, sizeof dirbuf, "%s", path);
+    {
+        char* slash = strrchr(dirbuf, '\\');
+        char* slash2 = strrchr(dirbuf, '/');
+        if (!slash || (slash2 && slash2 > slash)) slash = slash2;
+        if (slash) *slash = 0;
+    }
+    if (find_in_dir(dirbuf, "nvrtc-builtins*.dll", builtins, sizeof builtins))
+        LoadLibraryExA(builtins, NULL, load_flags);
+    lib = LoadLibraryExA(path, NULL, load_flags);
     if (!lib) {
         set_err("could not load NVRTC from %s", path);
         return 0;
     }
 #else
-    if (!path[0]) snprintf(path, sizeof path, "/usr/local/cuda/lib64/libnvrtc.so.12");
     void* lib = dlopen(path, RTLD_NOW);
-    if (!lib) lib = dlopen("libnvrtc.so.12", RTLD_NOW);
     if (!lib) {
         set_err("could not load NVRTC (%s)", path);
         return 0;

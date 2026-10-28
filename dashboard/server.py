@@ -1,6 +1,6 @@
 """Local dashboard for the CUDA Monte Carlo risk engine.
 
-Binds to 127.0.0.1 only. Job files and results stay under D:\\HPC_L2.
+Binds to 127.0.0.1 only. Job files and results stay in this repository.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ sys.path.insert(0, str(ROOT / "common"))
 
 import jobtext  # noqa: E402
 
-ENGINE = ROOT / "build" / "mc_engine.exe"
 HOST = "127.0.0.1"
 PORT = 8765
 
@@ -80,13 +79,37 @@ def cloud_estimate(result: dict) -> dict:
     }
 
 
+def engine_binary() -> Path:
+    names = ("mc_engine.exe", "mc_engine") if os.name == "nt" else ("mc_engine", "mc_engine.exe")
+    for name in names:
+        path = ROOT / "build" / name
+        if path.exists():
+            return path
+    return ROOT / "build" / names[0]
+
+
+def find_nvrtc() -> Path | None:
+    env = os.environ.get("NVRTC_PATH")
+    if env and Path(env).is_file():
+        return Path(env)
+    root = ROOT / ".cuda_pkgs"
+    if not root.exists():
+        return None
+    patterns = ("nvrtc64_*.dll", "libnvrtc.so*")
+    for pattern in patterns:
+        found = sorted(root.rglob(pattern))
+        if found:
+            return found[0]
+    return None
+
+
 def engine_env() -> dict:
     env = os.environ.copy()
     env["TEMP"] = str(ROOT / "tmp")
     env["TMP"] = str(ROOT / "tmp")
     env["PYTHONPYCACHEPREFIX"] = str(ROOT / ".cache" / "pyc")
-    nvrtc = ROOT / ".cuda_pkgs" / "nvidia" / "cuda_nvrtc" / "bin" / "nvrtc64_120_0.dll"
-    if nvrtc.exists():
+    nvrtc = find_nvrtc()
+    if nvrtc is not None:
         env["NVRTC_PATH"] = str(nvrtc)
     env["MC_KERNEL"] = str(ROOT / "kernels" / "mc_risk.cu")
     return env
@@ -134,8 +157,9 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             self._json(400, {"error": str(exc)})
             return
-        if not ENGINE.exists():
-            self._json(500, {"error": "mc_engine.exe is not built. Run build.ps1 on D:\\HPC_L2."})
+        engine = engine_binary()
+        if not engine.exists():
+            self._json(500, {"error": "The engine binary is missing. Run build.ps1 from the repository root."})
             return
         stamp = uuid.uuid4().hex[:12]
         work = ROOT / "tmp"
@@ -145,7 +169,7 @@ class Handler(BaseHTTPRequestHandler):
         job_path.write_text(jobtext.to_job_text(job), encoding="utf-8")
         try:
             proc = subprocess.run(
-                [str(ENGINE), "run", str(job_path), str(out_path)],
+                [str(engine), "run", str(job_path), str(out_path)],
                 cwd=str(ROOT),
                 capture_output=True,
                 text=True,
