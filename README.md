@@ -14,6 +14,8 @@ GPU Monte Carlo risk engine. Custom CUDA kernels price a book of equities and Eu
 
 ## Architecture
 
+The full write-up is in [architecture.md](architecture.md): the problem, both runtimes, the Monte Carlo method, the kernels, and the measured results.
+
 ```text
 Browser
   -> local dashboard (dashboard/server.py)     -> mc_engine
@@ -124,6 +126,7 @@ Option Monte Carlo prices fell inside the Black-Scholes 95% confidence interval.
 
 | Path | Role |
 | --- | --- |
+| `architecture.md` | Problem, runtimes, method, kernels, and measured results |
 | `kernels/mc_risk.cu` | RNG, European pricing, scenario VaR, Asian control variate |
 | `src/engine.c` | Driver API host, CPU baseline, JSON writer |
 | `dashboard/` | Browser and local API |
